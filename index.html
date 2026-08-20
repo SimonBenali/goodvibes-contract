@@ -634,6 +634,32 @@ function b64decode(str){
   return JSON.parse(decodeURIComponent(escape(atob(str))));
 }
 
+/* URL de l'Apps Script (déclarée ici car utilisée par le routing court juste
+   en dessous, et aussi plus bas pour l'envoi des contrats signés). */
+const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbzIU-PQC85ilSrabe1NHy92M04-dNLVy1FcsNMkPwzKbaio2LKr46KadYW8I8eCR8I2qA/exec";
+
+/* Récupère les données d'un lien court auprès de l'Apps Script. */
+async function fetchLinkData(id){
+  const res = await fetch(APPS_SCRIPT_URL + '?id=' + encodeURIComponent(id));
+  const json = await res.json();
+  if(!json.ok) throw new Error('link not found');
+  return json.data;
+}
+
+/* Envoie les données au backend, qui les stocke et renvoie un identifiant
+   court. En cas d'échec (ex : backend non à jour), une exception est levée
+   et le code appelant se rabat automatiquement sur l'ancien lien long. */
+async function createShortLink(type, data){
+  const res = await fetch(APPS_SCRIPT_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+    body: JSON.stringify({ action: 'createLink', type, data })
+  });
+  const json = await res.json();
+  if(!json.ok || !json.id) throw new Error('createLink failed');
+  return json.id;
+}
+
 /* ============================ ADMIN ACCESS CODE ============================
    Changez ce code, puis réhébergez le fichier (aucune autre étape requise).
    Protection simple côté client : suffisant pour dissuader un visiteur au
@@ -664,19 +690,27 @@ function renderPasscodeGate(onSuccess){
   document.getElementById('passInput').addEventListener('keydown', e=>{ if(e.key==='Enter') tryUnlock(); });
 }
 
-/* ============================ ROUTING ============================ */
+/* ============================ ROUTING ============================
+   Compatible avec deux formats de lien :
+   - Ancien format (long) : toutes les données encodées en base64 dans l'URL.
+   - Nouveau format (court) : un identifiant (?d=abc123 ou ?dj=abc123) qui
+     pointe vers des données stockées côté Apps Script. Si le décodage
+     base64 local échoue (ce qui est le cas pour un court identifiant),
+     on va chercher les données auprès du backend. */
+async function routeClient(raw){
+  try{ renderClientForm(b64decode(raw)); return; }catch(e){}
+  try{ renderClientForm(await fetchLinkData(raw)); }
+  catch(e){ renderError(); }
+}
+async function routeDJ(raw){
+  try{ renderDJSheet(b64decode(raw)); return; }catch(e){}
+  try{ renderDJSheet(await fetchLinkData(raw)); }
+  catch(e){ renderError(); }
+}
 if(params.get('d')){
-  let data;
-  try{ data = b64decode(params.get('d')); }
-  catch(e){ data = null; }
-  if(data) renderClientForm(data);
-  else renderError();
+  routeClient(params.get('d'));
 } else if(params.get('dj')){
-  let data;
-  try{ data = b64decode(params.get('dj')); }
-  catch(e){ data = null; }
-  if(data) renderDJSheet(data);
-  else renderError();
+  routeDJ(params.get('dj'));
 } else {
   renderPasscodeGate(renderAdminBuilder);
 }
@@ -771,18 +805,25 @@ function renderAdminBuilder(){
   </footer>
   `;
 
-  document.getElementById('genLinkBtn').addEventListener('click', () => {
+  document.getElementById('genLinkBtn').addEventListener('click', async () => {
     const data = {
       event: val('a_event'), type: val('a_type'), date: val('a_date'),
       addr: val('a_addr'), timing: val('a_timing'), company: val('a_company'),
       dj: val('a_dj'), djcontact: val('a_djcontact'), dress: val('a_dress'),
       arrival: val('a_arrival'), pack: val('a_pack'), fee: val('a_fee')
     };
-    const encoded = b64encode(data);
-    const longUrl = location.origin + location.pathname + '?d=' + encoded;
     const box = document.getElementById('linkBox');
+    const input = document.getElementById('genLink');
     box.classList.add('show');
-    document.getElementById('genLink').value = longUrl;
+    input.value = 'Génération du lien…';
+    let url;
+    try{
+      const id = await createShortLink('client', data);
+      url = location.origin + location.pathname + '?d=' + id;
+    }catch(e){
+      url = location.origin + location.pathname + '?d=' + b64encode(data);
+    }
+    input.value = url;
   });
 
   document.getElementById('copyBtn').addEventListener('click', () => {
@@ -795,7 +836,7 @@ function renderAdminBuilder(){
     });
   });
 
-  document.getElementById('genDjLinkBtn').addEventListener('click', () => {
+  document.getElementById('genDjLinkBtn').addEventListener('click', async () => {
     const data = {
       event: val('a_event'), type: val('a_type'), date: val('a_date'),
       addr: val('a_addr'), timing: val('a_timing'), company: val('a_company'),
@@ -803,11 +844,18 @@ function renderAdminBuilder(){
       arrival: val('a_arrival'), pack: val('a_pack'), djfee: val('a_djfee'),
       djbriefing: val('a_djbriefing')
     };
-    const encoded = b64encode(data);
-    const longUrl = location.origin + location.pathname + '?dj=' + encoded;
     const box = document.getElementById('djLinkBox');
+    const input = document.getElementById('genDjLink');
     box.classList.add('show');
-    document.getElementById('genDjLink').value = longUrl;
+    input.value = 'Génération du lien…';
+    let url;
+    try{
+      const id = await createShortLink('dj', data);
+      url = location.origin + location.pathname + '?dj=' + id;
+    }catch(e){
+      url = location.origin + location.pathname + '?dj=' + b64encode(data);
+    }
+    input.value = url;
   });
 
   document.getElementById('copyDjBtn').addEventListener('click', () => {
@@ -1266,8 +1314,9 @@ async function generatePDF(r){
    2. Extensions → Apps Script → collez le code fourni par Goodvibes/Claude.
    3. Déployer → Nouveau déploiement → Application Web →
       Exécuter en tant que "moi", Accès "Tout le monde".
-   4. Collez ici l'URL obtenue (se termine par /exec). */
-const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbzIU-PQC85ilSrabe1NHy92M04-dNLVy1FcsNMkPwzKbaio2LKr46KadYW8I8eCR8I2qA/exec";
+   4. Collez ici l'URL obtenue (se termine par /exec). Note : la constante
+      APPS_SCRIPT_URL est déclarée plus haut dans le fichier (elle sert
+      aussi aux liens courts), pas besoin d'y retoucher ici. */
 
 async function sendToGoogleSheet(record){
   if(APPS_SCRIPT_URL === "YOUR_APPS_SCRIPT_URL") return; // pas encore configuré
